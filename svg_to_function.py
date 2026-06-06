@@ -6,12 +6,15 @@
 输出相应的参数方程，参数 t ∈ [0, 1]。所有线段的紧凑坐标表达式 (x(t), y(t)) 
 会集中显示在输出末尾，每行一条。
 
-依赖项：svgpathtools（pip install svgpathtools）
-用法：python svg_to_function.py input.svg [-o output.txt]
+新增功能：使用 --fourier 选项可将指定路径拟合为傅里叶级数（周期函数），
+输出可直接复制到 Desmos 中使用。
+
+依赖项：svgpathtools, numpy（傅里叶模式需要）
+用法：python svg_to_function.py input.svg [-o output.txt] [--fourier N] [--path-index idx]
 """
 import argparse
 import sys
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Optional
 
 try:
     from svgpathtools import (
@@ -28,9 +31,14 @@ except ImportError:
     )
     sys.exit(1)
 
+# 傅里叶模式需要 numpy
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 
 # --- Helper Functions for Expression Generation ---
-# 将每个几何体类型的处理逻辑分离出来
 
 
 def _format_coefficient(coeff: float) -> str:
@@ -115,8 +123,6 @@ def _cubic_bezier_to_expression(seg: CubicBezier, seg_index: int) -> Tuple[str, 
 
 
 def _arc_to_expression(seg: Arc, seg_index: int) -> Tuple[str, str]:
-    # Arc 处理较为复杂，这里仍返回占位符，但可以提示用户。
-    # 也可以考虑调用 seg.split_cubic() 等方法近似转换。
     placeholder_text = "椭圆弧——表达式复杂，建议使用数值方法或近似"
     main_parts = [
         f"第 {seg_index} 段(弧):",
@@ -126,7 +132,7 @@ def _arc_to_expression(seg: Arc, seg_index: int) -> Tuple[str, str]:
     return "\n".join(main_parts), "Arc: complex expression, not provided"
 
 
-# --- Main Processing Logic ---
+# --- Main Processing Logic for Segments ---
 
 SegmentType = Union[Line, QuadraticBezier, CubicBezier, Arc]
 
@@ -167,35 +173,245 @@ def process_paths(paths: List[Path]) -> Tuple[List[str], List[str]]:
     return output_lines, coordinate_expressions
 
 
+# --- Fourier Fitting Functions ---
+
+
+def is_path_closed(path: Path, tolerance: float = 1e-6) -> bool:
+    """检查路径是否闭合（起点与终点距离小于容差）"""
+    if not path:
+        return False
+    start = path[0].start
+    end = path[-1].end
+    return abs(start - end) < tolerance
+
+
+def sample_path_points(path: Path, num_samples: int = 500) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    沿路径均匀采样参数 t ∈ [0, 1)，返回 x 和 y 坐标数组。
+    采样点不包括终点（终点与起点重合，用于周期函数）。
+    """
+    t_values = np.linspace(0, 1, num_samples, endpoint=False)
+    points = [path.point(t) for t in t_values]
+    x_vals = np.array([p.real for p in points])
+    y_vals = np.array([p.imag for p in points])
+    return x_vals, y_vals
+
+
+def compute_fourier_coeffs(values: np.ndarray, n_harmonics: int) -> Tuple[float, List[float], List[float]]:
+    """
+    对实序列 values 计算傅里叶级数系数。
+    返回 (a0, a_list, b_list)，其中 a_list 和 b_list 长度为 n_harmonics。
+    重建公式: f(t) = a0/2 + Σ_{n=1}^{N} (a_n cos(n t) + b_n sin(n t))
+    t ∈ [0, 2π)
+    """
+    N = len(values)
+    # 使用 rfft 得到正频率系数
+    coeffs = np.fft.rfft(values) / N
+    
+    a0 = 2 * coeffs[0].real  # 直流分量乘以2，使得 a0/2 为直流平均值
+    
+    a = []
+    b = []
+    for n in range(1, n_harmonics + 1):
+        if n < len(coeffs):
+            c = coeffs[n]
+            a_n = 2 * c.real
+            b_n = -2 * c.imag
+        else:
+            a_n = 0.0
+            b_n = 0.0
+        a.append(a_n)
+        b.append(b_n)
+    
+    return a0, a, b
+
+
+def format_fourier_series(prefix: str, a0: float, a_list: List[float], b_list: List[float], 
+                           var: str = "t", precision: int = 4) -> str:
+    """
+    将傅里叶系数格式化为 Desmos 可读的表达式字符串。
+    prefix: 表达式开头，例如 "x(t) = "
+    """
+    def fmt(x: float) -> str:
+        return f"{x:.{precision}f}".rstrip('0').rstrip('.')
+    
+    terms = []
+    # 直流项 a0/2
+    dc = a0 / 2
+    if abs(dc) > 1e-8:
+        terms.append(fmt(dc))
+    
+    for n, (a_n, b_n) in enumerate(zip(a_list, b_list), start=1):
+        if abs(a_n) < 1e-8 and abs(b_n) < 1e-8:
+            continue
+        term_parts = []
+        if abs(a_n) > 1e-8:
+            term_parts.append(f"{fmt(a_n)} * cos({n} {var})")
+        if abs(b_n) > 1e-8:
+            sign = "+" if b_n >= 0 else "-"
+            term_parts.append(f"{sign} {fmt(abs(b_n))} * sin({n} {var})")
+        if term_parts:
+            # 合并同一谐波项
+            combined = term_parts[0]
+            for part in term_parts[1:]:
+                combined += " " + part
+            terms.append(combined)
+    
+    if not terms:
+        return prefix + "0"
+    
+    expr = " + ".join(terms).replace("+ -", "- ")
+    return prefix + expr
+
+
+def fourier_fit_path(path: Path, n_harmonics: int = 5, num_samples: int = 1000) -> Tuple[str, str]:
+    """
+    对路径进行傅里叶级数拟合，返回 (x_expr, y_expr) 字符串，
+    可直接复制到 Desmos 中使用。
+    """
+    if np is None:
+        raise ImportError("傅里叶模式需要 numpy，请运行：pip install numpy")
+    
+    # 闭合检查（警告但不强制）
+    if not is_path_closed(path):
+        print(f"警告：路径未闭合，傅里叶拟合可能产生不连续效果", file=sys.stderr)
+    
+    # 采样路径点
+    x_vals, y_vals = sample_path_points(path, num_samples)
+    
+    # 计算傅里叶系数
+    a0_x, a_x, b_x = compute_fourier_coeffs(x_vals, n_harmonics)
+    a0_y, a_y, b_y = compute_fourier_coeffs(y_vals, n_harmonics)
+    
+    # 生成表达式
+    x_expr = format_fourier_series("x(t) = ", a0_x, a_x, b_x, "t", 4)
+    y_expr = format_fourier_series("y(t) = ", a0_y, a_y, b_y, "t", 4)
+    
+    # 提取纯表达式部分（不带 "x(t) = " 前缀）用于紧凑坐标格式
+    x_pure = x_expr.split("= ", 1)[1]
+    y_pure = y_expr.split("= ", 1)[1]
+    
+    return x_expr, y_expr, f"({x_pure}, {y_pure})"
+
+
+def output_fourier_result(path: Path, n_harmonics: int, path_idx: int, output_file: Optional[str] = None):
+    """输出傅里叶拟合结果"""
+    try:
+        x_expr, y_expr, coord_expr = fourier_fit_path(path, n_harmonics)
+    except ImportError as e:
+        print(f"错误：{e}", file=sys.stderr)
+        sys.exit(1)
+    
+    lines = [
+        f"路径 {path_idx} 傅里叶级数拟合 (谐波数 N={n_harmonics}):",
+        x_expr,
+        y_expr,
+        "t ∈ [0, 2π]",
+        "",
+        "可直接复制到 Desmos 的坐标表达式:",
+        coord_expr,
+    ]
+    
+    output_text = "\n".join(lines)
+    
+    if output_file:
+        with open(output_file, "w", encoding='utf-8') as f:
+            f.write(output_text)
+        print(f"输出已写入 {output_file}")
+    else:
+        print(output_text)
+
+
+# --- Main ---
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="将 SVG 路径转换为数学参数方程"
+        description="将 SVG 路径转换为数学参数方程，支持分段表达式或傅里叶级数拟合"
     )
     parser.add_argument("input", help="输入 SVG 文件")
-    parser.add_argument("-o", "--output", help="输出文件 （默认: 标准输出）")
+    parser.add_argument("-o", "--output", help="输出文件（默认: 标准输出）")
+    parser.add_argument("--fourier", type=int, nargs='?', const=5, default=None,
+                        help="使用傅里叶级数拟合，可选指定谐波次数（默认 5）")
+    parser.add_argument("--path-index", type=int, default=0,
+                        help="傅里叶模式下选择的路径索引（默认 0）")
+    parser.add_argument("--samples", type=int, default=1000,
+                        help="傅里叶模式下的采样点数（默认 1000）")
     args = parser.parse_args()
-
+    
+    # 读取 SVG
     try:
         paths, attributes = svg2paths(args.input)
     except Exception as e:
         print(f"读取 SVG 时出错：{e}", file=sys.stderr)
         sys.exit(1)
-
-    # 处理所有路径
+    
+    if not paths:
+        print("未找到任何路径", file=sys.stderr)
+        sys.exit(1)
+    
+    # 傅里叶模式
+    if args.fourier is not None:
+        if args.path_index >= len(paths):
+            print(f"错误：路径索引 {args.path_index} 超出范围（共 {len(paths)} 条路径）", file=sys.stderr)
+            sys.exit(1)
+        
+        # 临时修改采样点数（通过全局变量或参数传递）
+        # 由于 fourier_fit_path 使用固定参数，需要传递 samples
+        # 这里重新定义局部函数覆盖默认值（简便起见，直接修改函数调用）
+        # 更优雅：重构 fourier_fit_path 接受 samples 参数
+        # 为保持简洁，重新定义：
+        def fit_with_samples(p, n, s):
+            if np is None:
+                raise ImportError("需要 numpy")
+            x_vals, y_vals = sample_path_points(p, s)
+            a0_x, a_x, b_x = compute_fourier_coeffs(x_vals, n)
+            a0_y, a_y, b_y = compute_fourier_coeffs(y_vals, n)
+            x_expr = format_fourier_series("x(t) = ", a0_x, a_x, b_x, "t", 4)
+            y_expr = format_fourier_series("y(t) = ", a0_y, a_y, b_y, "t", 4)
+            x_pure = x_expr.split("= ", 1)[1]
+            y_pure = y_expr.split("= ", 1)[1]
+            return x_expr, y_expr, f"({x_pure}, {y_pure})"
+        
+        try:
+            x_expr, y_expr, coord_expr = fit_with_samples(paths[args.path_index], args.fourier, args.samples)
+        except ImportError as e:
+            print(f"错误：{e}", file=sys.stderr)
+            sys.exit(1)
+        
+        lines = [
+            f"路径 {args.path_index} 傅里叶级数拟合 (谐波数 N={args.fourier}, 采样点={args.samples}):",
+            x_expr,
+            y_expr,
+            "t ∈ [0, 2π]",
+            "",
+            "可直接复制到 Desmos 的坐标表达式:",
+            coord_expr,
+        ]
+        output_text = "\n".join(lines)
+        
+        if args.output:
+            with open(args.output, "w", encoding='utf-8') as f:
+                f.write(output_text)
+            print(f"输出已写入 {args.output}")
+        else:
+            print(output_text)
+        return
+    
+    # 原有分段模式
     output_lines, coordinate_expressions = process_paths(paths)
-
+    
     if not paths or all(len(p) == 0 for p in paths):
         output_lines = ["未找到路径段"]
-
-    # 添加最终的坐标表达式汇总
+    
     if coordinate_expressions:
         output_lines.extend(["", "各线段坐标表达式 (每行一条):"])
         output_lines.extend(coordinate_expressions)
-
+    
     output_text = "\n".join(output_lines)
-
+    
     if args.output:
-        with open(args.output, "w", encoding='utf-8') as f:  # 明确指定编码
+        with open(args.output, "w", encoding='utf-8') as f:
             f.write(output_text)
         print(f"输出已写入 {args.output}")
     else:
