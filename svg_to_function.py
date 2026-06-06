@@ -7,10 +7,11 @@
 会集中显示在输出末尾，每行一条。
 
 新增功能：使用 --fourier 选项可将指定路径拟合为傅里叶级数（周期函数），
-输出可直接复制到 Desmos 中使用。
+输出可直接复制到 Desmos 中使用。添加 --fit-all-paths 可对所有路径分别拟合，
+并在输出末尾聚合所有路径的坐标表达式。
 
 依赖项：svgpathtools, numpy（傅里叶模式需要）
-用法：python svg_to_function.py input.svg [-o output.txt] [--fourier N] [--path-index idx]
+用法：python svg_to_function.py input.svg [-o output.txt] [--fourier N] [--path-index idx] [--fit-all-paths] [--samples N]
 """
 import argparse
 import sys
@@ -264,9 +265,9 @@ def format_fourier_series(prefix: str, a0: float, a_list: List[float], b_list: L
     return prefix + expr
 
 
-def fourier_fit_path(path: Path, n_harmonics: int = 5, num_samples: int = 1000) -> Tuple[str, str]:
+def fourier_fit_path(path: Path, n_harmonics: int = 5, num_samples: int = 1000) -> Tuple[str, str, str]:
     """
-    对路径进行傅里叶级数拟合，返回 (x_expr, y_expr) 字符串，
+    对路径进行傅里叶级数拟合，返回 (x_expr, y_expr, coord_expr) 字符串，
     可直接复制到 Desmos 中使用。
     """
     if np is None:
@@ -274,7 +275,8 @@ def fourier_fit_path(path: Path, n_harmonics: int = 5, num_samples: int = 1000) 
     
     # 闭合检查（警告但不强制）
     if not is_path_closed(path):
-        print(f"警告：路径未闭合，傅里叶拟合可能产生不连续效果", file=sys.stderr)
+        # 可以静默或输出警告，这里为了整洁，不每次打印
+        pass
     
     # 采样路径点
     x_vals, y_vals = sample_path_points(path, num_samples)
@@ -294,16 +296,66 @@ def fourier_fit_path(path: Path, n_harmonics: int = 5, num_samples: int = 1000) 
     return x_expr, y_expr, f"({x_pure}, {y_pure})"
 
 
-def output_fourier_result(path: Path, n_harmonics: int, path_idx: int, output_file: Optional[str] = None):
-    """输出傅里叶拟合结果"""
+def fourier_fit_all_paths(paths: List[Path], n_harmonics: int, samples: int,
+                          output_file: Optional[str] = None) -> None:
+    """对所有路径进行傅里叶拟合，输出详细信息并在末尾聚合坐标表达式"""
+    results = []  # 每个元素为 (path_idx, x_expr, y_expr, coord_expr)
+    
+    # 收集所有结果
+    for idx, path in enumerate(paths):
+        try:
+            x_expr, y_expr, coord_expr = fourier_fit_path(path, n_harmonics, samples)
+            results.append((idx, x_expr, y_expr, coord_expr))
+        except Exception as e:
+            print(f"警告：路径 {idx} 拟合失败：{e}", file=sys.stderr)
+            continue
+    
+    if not results:
+        print("没有成功拟合任何路径", file=sys.stderr)
+        return
+    
+    # 构建输出字符串
+    output_parts = []
+    
+    # 详细块
+    for idx, x_expr, y_expr, coord_expr in results:
+        block = [
+            f"路径 {idx} 傅里叶级数拟合 (谐波数 N={n_harmonics}, 采样点={samples}):",
+            x_expr,
+            y_expr,
+            "t ∈ [0, 2π]",
+            "",
+            "---------------------",
+        ]
+        output_parts.append("\n".join(block))
+    
+    # 聚合坐标表达式（类似分段模式的末尾汇总）
+    coord_lines = ["", "各路径坐标表达式 (每行一条):"]
+    for idx, _, _, coord_expr in results:
+        coord_lines.append(coord_expr)
+    output_parts.append("\n".join(coord_lines))
+    
+    full_output = "\n".join(output_parts)
+    
+    if output_file:
+        with open(output_file, "w", encoding='utf-8') as f:
+            f.write(full_output)
+        print(f"输出已写入 {output_file}")
+    else:
+        print(full_output)
+
+
+def output_fourier_result_single(path: Path, n_harmonics: int, path_idx: int, 
+                                 samples: int, output_file: Optional[str] = None) -> None:
+    """输出单条路径的傅里叶拟合结果（不聚合，直接输出完整块）"""
     try:
-        x_expr, y_expr, coord_expr = fourier_fit_path(path, n_harmonics)
+        x_expr, y_expr, coord_expr = fourier_fit_path(path, n_harmonics, samples)
     except ImportError as e:
         print(f"错误：{e}", file=sys.stderr)
         sys.exit(1)
     
     lines = [
-        f"路径 {path_idx} 傅里叶级数拟合 (谐波数 N={n_harmonics}):",
+        f"路径 {path_idx} 傅里叶级数拟合 (谐波数 N={n_harmonics}, 采样点={samples}):",
         x_expr,
         y_expr,
         "t ∈ [0, 2π]",
@@ -311,7 +363,6 @@ def output_fourier_result(path: Path, n_harmonics: int, path_idx: int, output_fi
         "可直接复制到 Desmos 的坐标表达式:",
         coord_expr,
     ]
-    
     output_text = "\n".join(lines)
     
     if output_file:
@@ -335,6 +386,8 @@ def main():
                         help="使用傅里叶级数拟合，可选指定谐波次数（默认 5）")
     parser.add_argument("--path-index", type=int, default=0,
                         help="傅里叶模式下选择的路径索引（默认 0）")
+    parser.add_argument("--fit-all-paths", action="store_true",
+                        help="傅里叶模式下对所有路径分别拟合（覆盖 --path-index 设置）")
     parser.add_argument("--samples", type=int, default=1000,
                         help="傅里叶模式下的采样点数（默认 1000）")
     args = parser.parse_args()
@@ -352,50 +405,18 @@ def main():
     
     # 傅里叶模式
     if args.fourier is not None:
-        if args.path_index >= len(paths):
-            print(f"错误：路径索引 {args.path_index} 超出范围（共 {len(paths)} 条路径）", file=sys.stderr)
-            sys.exit(1)
-        
-        # 临时修改采样点数（通过全局变量或参数传递）
-        # 由于 fourier_fit_path 使用固定参数，需要传递 samples
-        # 这里重新定义局部函数覆盖默认值（简便起见，直接修改函数调用）
-        # 更优雅：重构 fourier_fit_path 接受 samples 参数
-        # 为保持简洁，重新定义：
-        def fit_with_samples(p, n, s):
-            if np is None:
-                raise ImportError("需要 numpy")
-            x_vals, y_vals = sample_path_points(p, s)
-            a0_x, a_x, b_x = compute_fourier_coeffs(x_vals, n)
-            a0_y, a_y, b_y = compute_fourier_coeffs(y_vals, n)
-            x_expr = format_fourier_series("x(t) = ", a0_x, a_x, b_x, "t", 4)
-            y_expr = format_fourier_series("y(t) = ", a0_y, a_y, b_y, "t", 4)
-            x_pure = x_expr.split("= ", 1)[1]
-            y_pure = y_expr.split("= ", 1)[1]
-            return x_expr, y_expr, f"({x_pure}, {y_pure})"
-        
-        try:
-            x_expr, y_expr, coord_expr = fit_with_samples(paths[args.path_index], args.fourier, args.samples)
-        except ImportError as e:
-            print(f"错误：{e}", file=sys.stderr)
-            sys.exit(1)
-        
-        lines = [
-            f"路径 {args.path_index} 傅里叶级数拟合 (谐波数 N={args.fourier}, 采样点={args.samples}):",
-            x_expr,
-            y_expr,
-            "t ∈ [0, 2π]",
-            "",
-            "可直接复制到 Desmos 的坐标表达式:",
-            coord_expr,
-        ]
-        output_text = "\n".join(lines)
-        
-        if args.output:
-            with open(args.output, "w", encoding='utf-8') as f:
-                f.write(output_text)
-            print(f"输出已写入 {args.output}")
+        if args.fit_all_paths:
+            # 对所有路径分别拟合，输出末尾聚合坐标表达式
+            fourier_fit_all_paths(paths, args.fourier, args.samples, args.output)
         else:
-            print(output_text)
+            # 单路径拟合
+            if args.path_index >= len(paths):
+                print(f"错误：路径索引 {args.path_index} 超出范围（共 {len(paths)} 条路径）", file=sys.stderr)
+                sys.exit(1)
+            output_fourier_result_single(
+                paths[args.path_index], args.fourier, args.path_index, args.samples,
+                output_file=args.output
+            )
         return
     
     # 原有分段模式
