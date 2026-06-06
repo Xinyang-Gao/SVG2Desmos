@@ -13,9 +13,10 @@
 
 椭圆弧现已支持精确参数方程，基于 SVG 弧的中心点参数化方法。
 支持 --precision 控制输出小数位数（默认 4）。
+支持 --flip-y 将 Y 轴翻转（适用于 Desmos 等数学坐标系），默认开启。
 
 依赖项：svgpathtools, numpy（傅里叶模式需要）
-用法：python svg_to_function.py input.svg [-o output.txt] [--fourier N] [--path-index idx] [--fit-all-paths] [--split-discontinuities] [--samples N] [--precision N]
+用法：python svg_to_function.py input.svg [-o output.txt] [--fourier N] [--path-index idx] [--fit-all-paths] [--split-discontinuities] [--samples N] [--precision N] [--no-flip-y]
 """
 import argparse
 import sys
@@ -243,6 +244,51 @@ def _arc_to_expression(seg: Arc, seg_index: int) -> Tuple[str, str]:
         "--------------------",
     ]
     return "\n".join(main_parts), f"({x_expr}, {y_expr})"
+
+
+# --- Path Transformation for Y-Flip ---
+
+
+def transform_path(path: Path, flip_y: bool = True) -> Path:
+    """
+    对路径中的所有点进行 Y 坐标翻转（如果 flip_y 为 True）。
+    对于 Arc，同时取反 sweep 标志以保持方向正确。
+    """
+    if not flip_y:
+        return path
+    new_segments = []
+    for seg in path:
+        if isinstance(seg, Line):
+            new_start = complex(seg.start.real, -seg.start.imag)
+            new_end = complex(seg.end.real, -seg.end.imag)
+            new_segments.append(Line(new_start, new_end))
+        elif isinstance(seg, QuadraticBezier):
+            new_start = complex(seg.start.real, -seg.start.imag)
+            new_control = complex(seg.control.real, -seg.control.imag)
+            new_end = complex(seg.end.real, -seg.end.imag)
+            new_segments.append(QuadraticBezier(new_start, new_control, new_end))
+        elif isinstance(seg, CubicBezier):
+            new_start = complex(seg.start.real, -seg.start.imag)
+            new_control1 = complex(seg.control1.real, -seg.control1.imag)
+            new_control2 = complex(seg.control2.real, -seg.control2.imag)
+            new_end = complex(seg.end.real, -seg.end.imag)
+            new_segments.append(CubicBezier(new_start, new_control1, new_control2, new_end))
+        elif isinstance(seg, Arc):
+            new_start = complex(seg.start.real, -seg.start.imag)
+            new_end = complex(seg.end.real, -seg.end.imag)
+            # 半径不变（半径是标量正值，不受翻转影响）
+            new_radius = seg.radius
+            # 旋转角度不变
+            new_rotation = seg.rotation
+            # large_arc 不变
+            new_large_arc = seg.large_arc
+            # sweep 取反
+            new_sweep = not seg.sweep
+            new_segments.append(Arc(new_start, new_end, new_radius, new_rotation, new_large_arc, new_sweep))
+        else:
+            # 未知类型，原样复制（通常不会发生）
+            new_segments.append(seg)
+    return Path(*new_segments)
 
 
 # --- Main Processing Logic for Segments ---
@@ -586,6 +632,10 @@ def main():
                         help="傅里叶模式下的采样点数（默认 1000）")
     parser.add_argument("--precision", type=int, default=4,
                         help="输出表达式的小数精度（默认 4）")
+    parser.add_argument("--flip-y", action="store_true", default=True,
+                        help="翻转 Y 坐标（适用于 Desmos 等数学坐标系，默认开启）")
+    parser.add_argument("--no-flip-y", dest="flip_y", action="store_false",
+                        help="禁用 Y 轴翻转，保留 SVG 原始坐标系")
     args = parser.parse_args()
     
     # 设置全局精度
@@ -602,6 +652,11 @@ def main():
     if not paths:
         print("未找到任何路径", file=sys.stderr)
         sys.exit(1)
+    
+    # 应用 Y 轴翻转（如果需要）
+    if args.flip_y:
+        paths = [transform_path(p, flip_y=True) for p in paths]
+        print("已应用 Y 轴翻转 (SVG → 数学坐标系)", file=sys.stderr)
     
     # 傅里叶模式
     if args.fourier is not None:

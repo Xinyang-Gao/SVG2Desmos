@@ -30,6 +30,7 @@ try:
         fourier_fit_path,
         split_path_at_discontinuities,
         collect_continuous_segments,
+        transform_path,          # 新增导入
         PRECISION as default_precision,
     )
 except ImportError:
@@ -45,7 +46,7 @@ class SVGMathGUI:
         self.root.minsize(800, 600)
 
         # 存储数据
-        self.paths = []          # 原始路径列表
+        self.paths = []          # 原始路径列表（未翻转）
         self.current_mode = tk.StringVar(value="segments")
         self.fourier_harmonics = tk.IntVar(value=5)
         self.fourier_samples = tk.IntVar(value=1000)
@@ -53,6 +54,7 @@ class SVGMathGUI:
         self.fit_all_paths = tk.BooleanVar(value=False)
         self.split_discont = tk.BooleanVar(value=False)
         self.selected_path_idx = tk.IntVar(value=0)
+        self.flip_y = tk.BooleanVar(value=True)   # 默认开启 Y 轴翻转
 
         self.build_ui()
 
@@ -116,6 +118,9 @@ class SVGMathGUI:
         ttk.Spinbox(left_frame, from_=0, to=10, textvariable=self.precision, width=5,
                     increment=1).pack(anchor=tk.W)
 
+        # 坐标系翻转选项
+        ttk.Checkbutton(left_frame, text="翻转 Y 坐标 (适用于 Desmos)", variable=self.flip_y).pack(anchor=tk.W, pady=5)
+
         # 生成按钮
         ttk.Button(left_frame, text="生成表达式", command=self.generate_expr).pack(fill=tk.X, pady=10)
 
@@ -166,6 +171,13 @@ class SVGMathGUI:
         self.path_info_text.insert(tk.END, "\n".join(info))
         self.path_info_text.config(state=tk.DISABLED)
 
+    def _get_transformed_paths(self):
+        """根据当前 flip_y 选项返回转换后的路径副本"""
+        if self.flip_y.get():
+            return [transform_path(p, flip_y=True) for p in self.paths]
+        else:
+            return [p for p in self.paths]   # 返回原始路径的浅拷贝（不影响原列表）
+
     def generate_expr(self):
         """根据当前设置生成表达式（可能耗时，在后台线程中运行）"""
         if not self.paths:
@@ -187,12 +199,16 @@ class SVGMathGUI:
             self.generate_fourier()
 
     def generate_segments(self):
-        """分段模式，直接使用原脚本的 process_paths"""
+        """分段模式，使用转换后的路径"""
         try:
-            output_lines, coord_exprs = process_paths(self.paths)
+            transformed_paths = self._get_transformed_paths()
+            output_lines, coord_exprs = process_paths(transformed_paths)
             if coord_exprs:
                 output_lines.extend(["", "各线段坐标表达式 (每行一条):"])
                 output_lines.extend(coord_exprs)
+            # 添加说明是否翻转了 Y 轴
+            if self.flip_y.get():
+                output_lines.insert(0, "已应用 Y 轴翻转 (SVG → 数学坐标系)")
             output_text = "\n".join(output_lines)
             self.output_text.delete(1.0, tk.END)
             self.output_text.insert(tk.END, output_text)
@@ -213,28 +229,33 @@ class SVGMathGUI:
         split = self.split_discont.get()
         fit_all = self.fit_all_paths.get()
         path_idx = self.selected_path_idx.get()
+        flip = self.flip_y.get()
 
-        if not fit_all and (path_idx < 0 or path_idx >= len(self.paths)):
-            messagebox.showerror("错误", f"路径索引 {path_idx} 无效，共有 {len(self.paths)} 条路径。")
+        transformed_paths = self._get_transformed_paths()
+
+        if not fit_all and (path_idx < 0 or path_idx >= len(transformed_paths)):
+            messagebox.showerror("错误", f"路径索引 {path_idx} 无效，共有 {len(transformed_paths)} 条路径。")
             return
 
         # 禁用按钮，显示进度
         self.status_var.set("正在计算傅里叶级数，请稍候...")
         # 启动线程
         thread = threading.Thread(target=self._fourier_worker,
-                                  args=(harmonics, samples, split, fit_all, path_idx),
+                                  args=(transformed_paths, harmonics, samples, split, fit_all, path_idx, flip),
                                   daemon=True)
         thread.start()
 
-    def _fourier_worker(self, harmonics, samples, split, fit_all, path_idx):
+    def _fourier_worker(self, transformed_paths, harmonics, samples, split, fit_all, path_idx, flip):
         """后台执行傅里叶拟合，完成后更新 UI"""
         try:
             from svg_to_function import fourier_fit_path, collect_continuous_segments
             output_parts = []
+            if flip:
+                output_parts.append("已应用 Y 轴翻转 (SVG → 数学坐标系)")
 
             if fit_all:
                 # 收集所有连续段
-                segments = collect_continuous_segments(self.paths, split)
+                segments = collect_continuous_segments(transformed_paths, split)
                 results = []
                 for label, path in segments:
                     try:
@@ -259,7 +280,7 @@ class SVGMathGUI:
                             output_parts.append(coord_expr)
             else:
                 # 单路径模式，需要处理分割
-                path = self.paths[path_idx]
+                path = transformed_paths[path_idx]
                 if split:
                     subpaths = split_path_at_discontinuities(path)
                     if len(subpaths) == 1:
