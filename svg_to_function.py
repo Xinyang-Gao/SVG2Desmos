@@ -8,10 +8,11 @@
 
 新增功能：使用 --fourier 选项可将指定路径拟合为傅里叶级数（周期函数），
 输出可直接复制到 Desmos 中使用。添加 --fit-all-paths 可对所有路径分别拟合，
-并在输出末尾聚合所有路径的坐标表达式。
+并在输出末尾聚合所有路径的坐标表达式。添加 --split-discontinuities 可自动将
+路径内部的不连续点断开，分别拟合每个连续段。
 
 依赖项：svgpathtools, numpy（傅里叶模式需要）
-用法：python svg_to_function.py input.svg [-o output.txt] [--fourier N] [--path-index idx] [--fit-all-paths] [--samples N]
+用法：python svg_to_function.py input.svg [-o output.txt] [--fourier N] [--path-index idx] [--fit-all-paths] [--split-discontinuities] [--samples N]
 """
 import argparse
 import sys
@@ -174,6 +175,61 @@ def process_paths(paths: List[Path]) -> Tuple[List[str], List[str]]:
     return output_lines, coordinate_expressions
 
 
+# --- Path Splitting at Discontinuities ---
+
+
+def split_path_at_discontinuities(path: Path, tolerance: float = 1e-6) -> List[Path]:
+    """
+    将一个路径按照线段之间的不连续点（跳跃）分割成多个连续的子路径。
+    返回子路径列表，每个子路径内的线段首尾相连（连续）。
+    """
+    if not path:
+        return []
+    
+    subpaths = []
+    current_segments = []
+    
+    # 第一个线段直接加入
+    current_segments.append(path[0])
+    
+    for i in range(1, len(path)):
+        prev_seg = path[i-1]
+        curr_seg = path[i]
+        # 检查当前线段的起点与上一线段的终点是否连续
+        if abs(curr_seg.start - prev_seg.end) > tolerance:
+            # 不连续，结束当前子路径并开始新子路径
+            if current_segments:
+                subpaths.append(Path(*current_segments))
+            current_segments = [curr_seg]
+        else:
+            current_segments.append(curr_seg)
+    
+    if current_segments:
+        subpaths.append(Path(*current_segments))
+    
+    return subpaths
+
+
+def collect_continuous_segments(paths: List[Path], split: bool, tolerance: float = 1e-6) -> List[Tuple[str, Path]]:
+    """
+    根据是否分割，将输入路径列表转换为连续段列表。
+    返回列表，每个元素为 (label, path)，label 如 "路径0" 或 "路径0段1"。
+    """
+    segments = []
+    for path_idx, path in enumerate(paths):
+        if split:
+            subpaths = split_path_at_discontinuities(path, tolerance)
+            if len(subpaths) == 1:
+                # 无间断，仍标记为单一段
+                segments.append((f"路径{path_idx}", subpaths[0]))
+            else:
+                for sub_idx, subpath in enumerate(subpaths):
+                    segments.append((f"路径{path_idx}段{sub_idx}", subpath))
+        else:
+            segments.append((f"路径{path_idx}", path))
+    return segments
+
+
 # --- Fourier Fitting Functions ---
 
 
@@ -273,11 +329,6 @@ def fourier_fit_path(path: Path, n_harmonics: int = 5, num_samples: int = 1000) 
     if np is None:
         raise ImportError("傅里叶模式需要 numpy，请运行：pip install numpy")
     
-    # 闭合检查（警告但不强制）
-    if not is_path_closed(path):
-        # 可以静默或输出警告，这里为了整洁，不每次打印
-        pass
-    
     # 采样路径点
     x_vals, y_vals = sample_path_points(path, num_samples)
     
@@ -296,31 +347,33 @@ def fourier_fit_path(path: Path, n_harmonics: int = 5, num_samples: int = 1000) 
     return x_expr, y_expr, f"({x_pure}, {y_pure})"
 
 
-def fourier_fit_all_paths(paths: List[Path], n_harmonics: int, samples: int,
-                          output_file: Optional[str] = None) -> None:
-    """对所有路径进行傅里叶拟合，输出详细信息并在末尾聚合坐标表达式"""
-    results = []  # 每个元素为 (path_idx, x_expr, y_expr, coord_expr)
+def fourier_fit_multiple_segments(segments: List[Tuple[str, Path]], n_harmonics: int, samples: int,
+                                   output_file: Optional[str] = None) -> None:
+    """
+    对多个连续段进行傅里叶拟合，输出详细信息并在末尾聚合坐标表达式。
+    segments: 列表，每个元素为 (label, path)，label 如 "路径0" 或 "路径0段1"
+    """
+    results = []  # 每个元素为 (label, x_expr, y_expr, coord_expr)
     
-    # 收集所有结果
-    for idx, path in enumerate(paths):
+    for label, path in segments:
         try:
             x_expr, y_expr, coord_expr = fourier_fit_path(path, n_harmonics, samples)
-            results.append((idx, x_expr, y_expr, coord_expr))
+            results.append((label, x_expr, y_expr, coord_expr))
         except Exception as e:
-            print(f"警告：路径 {idx} 拟合失败：{e}", file=sys.stderr)
+            print(f"警告：{label} 拟合失败：{e}", file=sys.stderr)
             continue
     
     if not results:
-        print("没有成功拟合任何路径", file=sys.stderr)
+        print("没有成功拟合任何连续段", file=sys.stderr)
         return
     
     # 构建输出字符串
     output_parts = []
     
     # 详细块
-    for idx, x_expr, y_expr, coord_expr in results:
+    for label, x_expr, y_expr, coord_expr in results:
         block = [
-            f"路径 {idx} 傅里叶级数拟合 (谐波数 N={n_harmonics}, 采样点={samples}):",
+            f"{label} 傅里叶级数拟合 (谐波数 N={n_harmonics}, 采样点={samples}):",
             x_expr,
             y_expr,
             "t ∈ [0, 2π]",
@@ -330,8 +383,8 @@ def fourier_fit_all_paths(paths: List[Path], n_harmonics: int, samples: int,
         output_parts.append("\n".join(block))
     
     # 聚合坐标表达式（类似分段模式的末尾汇总）
-    coord_lines = ["", "各路径坐标表达式 (每行一条):"]
-    for idx, _, _, coord_expr in results:
+    coord_lines = ["", "各连续段坐标表达式 (每行一条，按顺序对应上面各段):"]
+    for _, _, _, coord_expr in results:
         coord_lines.append(coord_expr)
     output_parts.append("\n".join(coord_lines))
     
@@ -346,16 +399,40 @@ def fourier_fit_all_paths(paths: List[Path], n_harmonics: int, samples: int,
 
 
 def output_fourier_result_single(path: Path, n_harmonics: int, path_idx: int, 
-                                 samples: int, output_file: Optional[str] = None) -> None:
-    """输出单条路径的傅里叶拟合结果（不聚合，直接输出完整块）"""
+                                 samples: int, output_file: Optional[str] = None,
+                                 split: bool = False) -> None:
+    """
+    输出单条路径的傅里叶拟合结果。
+    如果 split=True，则先分割该路径为连续段，然后对每段拟合（类似多段模式）。
+    如果 split=False，则整体拟合并直接输出。
+    """
+    if split:
+        subpaths = split_path_at_discontinuities(path)
+        if len(subpaths) == 1:
+            # 实际没有断开，仍按单段处理
+            _output_single_segment(path, path_idx, n_harmonics, samples, output_file)
+        else:
+            segments = [(f"路径{path_idx}段{sub_idx}", subpath) for sub_idx, subpath in enumerate(subpaths)]
+            fourier_fit_multiple_segments(segments, n_harmonics, samples, output_file)
+    else:
+        _output_single_segment(path, path_idx, n_harmonics, samples, output_file)
+
+
+def _output_single_segment(path: Path, label: Union[int, str], n_harmonics: int, samples: int, output_file: Optional[str]) -> None:
+    """内部函数：输出单个连续段的拟合结果（不分段，不聚合）"""
     try:
         x_expr, y_expr, coord_expr = fourier_fit_path(path, n_harmonics, samples)
     except ImportError as e:
         print(f"错误：{e}", file=sys.stderr)
         sys.exit(1)
     
+    if isinstance(label, int):
+        label_str = f"路径 {label}"
+    else:
+        label_str = str(label)
+    
     lines = [
-        f"路径 {path_idx} 傅里叶级数拟合 (谐波数 N={n_harmonics}, 采样点={samples}):",
+        f"{label_str} 傅里叶级数拟合 (谐波数 N={n_harmonics}, 采样点={samples}):",
         x_expr,
         y_expr,
         "t ∈ [0, 2π]",
@@ -388,6 +465,8 @@ def main():
                         help="傅里叶模式下选择的路径索引（默认 0）")
     parser.add_argument("--fit-all-paths", action="store_true",
                         help="傅里叶模式下对所有路径分别拟合（覆盖 --path-index 设置）")
+    parser.add_argument("--split-discontinuities", action="store_true",
+                        help="傅里叶模式下自动将路径内部的不连续点断开，分别拟合每个连续段")
     parser.add_argument("--samples", type=int, default=1000,
                         help="傅里叶模式下的采样点数（默认 1000）")
     args = parser.parse_args()
@@ -406,20 +485,21 @@ def main():
     # 傅里叶模式
     if args.fourier is not None:
         if args.fit_all_paths:
-            # 对所有路径分别拟合，输出末尾聚合坐标表达式
-            fourier_fit_all_paths(paths, args.fourier, args.samples, args.output)
+            # 收集所有连续段
+            segments = collect_continuous_segments(paths, args.split_discontinuities)
+            fourier_fit_multiple_segments(segments, args.fourier, args.samples, args.output)
         else:
-            # 单路径拟合
+            # 单路径模式
             if args.path_index >= len(paths):
                 print(f"错误：路径索引 {args.path_index} 超出范围（共 {len(paths)} 条路径）", file=sys.stderr)
                 sys.exit(1)
             output_fourier_result_single(
                 paths[args.path_index], args.fourier, args.path_index, args.samples,
-                output_file=args.output
+                output_file=args.output, split=args.split_discontinuities
             )
         return
     
-    # 原有分段模式
+    # 原有分段模式（不支持分割，因为分段模式原本就逐段输出，不涉及不连续问题）
     output_lines, coordinate_expressions = process_paths(paths)
     
     if not paths or all(len(p) == 0 for p in paths):
