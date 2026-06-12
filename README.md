@@ -1,5 +1,140 @@
 # SVG to Desmos
 
+Convert SVG paths into mathematical expressions (parametric equations), supporting piecewise exact expressions and Fourier series fitting. The generated expressions can be copied directly into mathematical graphing tools such as [Desmos](https://www.desmos.com/calculator).
+
+## Features
+
+- **Piecewise parametric equations**  
+  Convert each segment (line, quadratic/cubic Bézier, elliptical arc) into an exact parametric equation, outputting `(x(t), y(t))` expressions with `t ∈ [0,1]`.
+
+- **Fourier series fitting**  
+  Fit the entire path (or consecutive segments) into a Fourier series, outputting trigonometric expressions for `x(t)` and `y(t)` with `t ∈ [0, 2π]`. Ideal for converting closed or complex curves into compact periodic functions.
+
+- **Automatic discontinuity handling**  
+  Automatically break paths at internal discontinuities (jumps) and fit each continuous segment separately.
+
+- **Coordinate flip**  
+  Y‑axis is flipped by default (SVG → math coordinate system) so that the graph appears upright in Desmos; can be disabled with an option.
+
+- **Graphical User Interface (GUI)**  
+  Provides a Tkinter‑based visual tool, no command‑line experience required.
+
+## Dependencies
+
+### Command line version (`svg_to_function.py`)
+```bash
+pip install svgpathtools numpy
+```
+
+### GUI version (`svg_to_function_gui.py`)
+Requires Tkinter (comes with Python) in addition to the above dependencies.
+
+## Command‑line tool usage
+
+```bash
+python svg_to_function.py input.svg [-o output.txt] [options]
+```
+
+### Basic arguments
+
+| Argument | Description |
+|----------|-------------|
+| `input.svg` | Input SVG file path |
+| `-o`, `--output` | Output file (default: stdout) |
+| `--precision N` | Decimal precision (default: 4) |
+| `--flip-y` / `--no-flip-y` | Enable/disable Y‑axis flipping (default: enabled) |
+
+### Piecewise mode (default)
+
+No extra options – outputs exact parametric equations per original segment.
+
+Example:
+```bash
+python svg_to_function.py heart.svg --precision 3
+```
+
+### Fourier mode
+
+Enable with `--fourier [N]` where `N` is the number of harmonics (default: 5).
+
+| Option | Description |
+|--------|-------------|
+| `--fourier [N]` | Enable Fourier fitting, optionally specify number of harmonics |
+| `--path-index idx` | Select which path to fit (default: 0) |
+| `--fit-all-paths` | Fit all paths in the SVG separately (overrides `--path-index`) |
+| `--split-discontinuities` | Automatically split at discontinuities, fit each continuous segment |
+| `--samples N` | Number of sampling points (default: 1000) |
+
+Examples:
+```bash
+# Fit path 0 with 10 harmonics
+python svg_to_function.py logo.svg --fourier 10
+
+# Fit all paths, split discontinuities, save to file
+python svg_to_function.py icon.svg --fourier 8 --fit-all-paths --split-discontinuities -o fourier.txt
+```
+
+## GUI usage
+
+Launch the graphical interface:
+```bash
+python svg_to_function_gui.py
+```
+
+Interface description:
+- **Open SVG file** – choose the SVG file to convert.
+- **Path info** – displays number of segments per path.
+- **Output mode** – switch between “Piecewise expressions” or “Fourier series fitting”.
+- **Fourier parameters** – set harmonic order, sample points, discontinuity splitting, and whether to fit all paths.
+- **Target path index** – select a single path when fitting only one.
+- **Decimal precision** – controls the number of decimal places in the output.
+- **Flip Y coordinate** – checked by default (Desmos ready).
+- **Generate expressions** – perform the conversion.
+- **Copy to clipboard** / **Save to file** – export the result.
+
+## Output format description
+
+### Piecewise mode example output
+```
+Path 0:
+Segment 0 (elliptical arc):
+ x(t) = 0 + 2*cos(0)*cos(0 + t*6.283) - 1*sin(0)*sin(0 + t*6.283)
+ y(t) = 0 + 2*sin(0)*cos(0 + t*6.283) + 1*cos(0)*sin(0 + t*6.283)
+ t ∈ [0, 1]
+--------------------
+...
+Coordinates (one parametric pair per line):
+(0 + 2*cos(0)*cos(0 + t*6.283) - 1*sin(0)*sin(0 + t*6.283), 0 + 2*sin(0)*cos(0 + t*6.283) + 1*cos(0)*sin(0 + t*6.283))
+...
+```
+
+### Fourier mode example output
+```
+Path 0 Fourier series fit (harmonics N=5):
+x(t) = 1.23 + 0.5 * cos(1 t) - 0.2 * sin(1 t) + 0.1 * cos(2 t) ...
+y(t) = 0.5 + 0.3 * cos(1 t) + 0.4 * sin(1 t) - 0.05 * cos(2 t) ...
+t ∈ [0, 2π]
+Coordinates:
+(1.23 + 0.5 * cos(1 t) - 0.2 * sin(1 t) + 0.1 * cos(2 t) ..., 0.5 + 0.3 * cos(1 t) + 0.4 * sin(1 t) - 0.05 * cos(2 t) ...)
+```
+
+## Notes
+
+1. **Elliptical arc conversion** – the script implements exact centre parameterisation for SVG elliptical arcs, supporting arbitrary rotation, large‑arc flags, and sweep flags.
+2. **Fourier sampling** – paths are sampled uniformly in the parameter `t` (not arc length). For non‑uniformly parameterised paths, increasing the number of sampling points improves accuracy.
+3. **Performance** – Fourier mode computation grows with harmonic order and sample count. Be patient with complex paths.
+4. **Desmos compatibility** – Y‑axis flipping is enabled by default; expressions can be copied directly into Desmos’s expression line (using `t` as the parameter variable).
+5. **Discontinuity detection** – discontinuities are detected by comparing the distance between consecutive segment end/start points (tolerance 1e‑6).
+
+## License (MIT)
+
+This script is free to use. Suggestions and pull requests are welcome.
+
+---
+
+# 中文
+# SVG to Desmos
+
 将 SVG 路径转换为数学表达式（参数方程），支持分段精确表达式和傅里叶级数拟合。生成的表达式可直接复制到 [Desmos](https://www.desmos.com/calculator) 等数学绘图工具中使用。
 
 ## 功能特点
