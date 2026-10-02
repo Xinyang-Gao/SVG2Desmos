@@ -82,15 +82,27 @@ python svg_to_function_gui.py
 ```
 
 Interface description:
-- **Open SVG file** – choose the SVG file to convert.
-- **Path info** – displays number of segments per path.
-- **Output mode** – switch between “Piecewise expressions” or “Fourier series fitting”.
-- **Fourier parameters** – set harmonic order, sample points, discontinuity splitting, and whether to fit all paths.
-- **Target path index** – select a single path when fitting only one.
+- **File** – open an SVG file (`Ctrl+O`).
+- **Path list** – one row per path with its segment count and open/closed state; clicking a row selects the target path and keeps the index field in sync.
+- **Preview** – draws every path and highlights the selected one in blue; flipping the Y axis re-renders instantly, and dashed lines mark the coordinate axes.
+- **Output mode** – switch between “Piecewise expressions” (exact) and “Fourier series fitting”. Fourier-only controls are disabled while piecewise mode is active.
+- **Fourier parameters** – harmonic order, sample points, discontinuity splitting, fit-all-paths (the target index is disabled when “fit all” is checked).
 - **Decimal precision** – controls the number of decimal places in the output.
 - **Flip Y coordinate** – checked by default (Desmos ready).
-- **Generate expressions** – perform the conversion.
-- **Copy to clipboard** / **Save to file** – export the result.
+- **Generate expressions** (`F5`) – runs in a background thread with a progress bar, so the window never freezes; the status bar reports elapsed time and output length.
+- **Copy to clipboard** (`Ctrl+Shift+C`) / **Save to file** (`Ctrl+S`) / **Clear output** – export or reset the result; “Wrap lines” toggles word wrap.
+
+The GUI and the command line share the same report builders, so both produce identical output for identical settings.
+
+## Automated tests
+
+```bash
+python test_core_math.py   # core math correctness (no display needed)
+python test_gui_smoke.py   # GUI smoke test
+```
+
+- `test_core_math.py` re-evaluates the generated parametric equations and compares them against `svgpathtools`' own `path.point(t)` for every segment type (line, quadratic/cubic Bézier, rotated elliptical arc), verifies that Y‑flipping is an exact mirror image, checks the Fourier series reconstruction, and exercises the error paths.
+- `test_gui_smoke.py` builds the window without showing it, then drives the real widgets (path list, preview, background generation in both modes, clipboard) and prints a pass/fail summary.
 
 ## Output format description
 
@@ -217,15 +229,27 @@ python svg_to_function_gui.py
 ```
 
 界面说明：
-- **打开 SVG 文件**：选择要转换的 SVG。
-- **路径信息**：显示每个路径包含的线段数量。
-- **输出模式**：切换“分段表达式”或“傅里叶级数拟合”。
-- **傅里叶参数**：设置谐波次数、采样点数、是否分割不连续点、是否拟合所有路径。
-- **目标路径索引**：仅拟合单条路径时选择。
+- **文件**：打开 SVG 文件（`Ctrl+O`）。
+- **路径列表**：每行显示一条路径的线段数量与闭合状态；点击某行即选中目标路径，并与“目标路径索引”联动。
+- **预览**：绘制全部路径，当前选中路径以蓝色高亮；勾选/取消“翻转 Y 坐标”会即时重绘，虚线表示坐标轴。
+- **输出模式**：切换“分段表达式（精确）”或“傅里叶级数拟合”；分段模式下傅里叶参数自动禁用。
+- **傅里叶参数**：谐波次数、采样点数、分割不连续点、拟合所有路径（勾选后“目标路径索引”自动禁用）。
 - **小数精度**：控制输出数字的小数位数。
 - **翻转 Y 坐标**：默认勾选，适配 Desmos。
-- **生成表达式**：执行转换。
-- **复制到剪贴板** / **保存到文件**：导出结果。
+- **生成表达式**（`F5`）：在后台线程中执行并显示进度条，界面不会卡死；状态栏显示耗时与输出字符数。
+- **复制到剪贴板**（`Ctrl+Shift+C`）/ **保存到文件**（`Ctrl+S`）/ **清空输出**：导出或重置结果；“自动换行”控制输出区换行方式。
+
+GUI 与命令行共用同一套报告构建函数，相同参数下两者输出完全一致。
+
+## 自动化测试
+
+```bash
+python test_core_math.py   # 核心算法正确性（无需显示器）
+python test_gui_smoke.py   # GUI 冒烟测试
+```
+
+- `test_core_math.py`：把生成的参数方程重新求值，与 svgpathtools 自身的 `path.point(t)` 对比，覆盖直线、二次/三次贝塞尔与旋转椭圆弧；同时校验 Y 翻转是精确镜像、傅里叶级数可重建路径，并覆盖参数校验的错误分支。
+- `test_gui_smoke.py`：不显示窗口地构建界面，驱动真实控件（路径列表、预览、两种模式的后台生成、剪贴板），输出通过/失败统计。
 
 ## 输出格式说明
 
