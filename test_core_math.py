@@ -5,7 +5,8 @@
 用法: python test_core_math.py
 
 把生成的参数方程/傅里叶级数重新求值，与 svgpathtools 自身的 path.point(t)
-对比，覆盖直线、二次/三次贝塞尔、椭圆弧（含旋转与非等半径）以及 Y 翻转。
+对比，覆盖直线、二次/三次贝塞尔、椭圆弧（含旋转与非等半径）以及 Y 翻转；
+另外校验报告的中英双语输出、多路径子集（path_indices）与 CLI 选项。
 """
 import math
 import os
@@ -140,6 +141,137 @@ def test_discontinuity_split():
     check("连续路径不被切分", len(core.split_path_at_discontinuities(paths[0])) == 1)
 
 
+def test_report_languages():
+    """报告构建器支持 lang="en"，且默认中文输出保持不变。"""
+    paths = [core.transform_path(p, flip_y=True) for p in load_fixture()]
+
+    zh = core.build_segment_report(paths, precision=4, lang="zh")
+    en = core.build_segment_report(paths, precision=4, lang="en")
+    check("英文分段报告标题", "Path 0:" in en and "Segment 0 (" in en, en[:80])
+    check("英文分段报告坐标汇总", "Coordinate expressions (one per line):" in en)
+    check("英文报告不含中文标题",
+          "路径 0" not in en and "各线段坐标表达式" not in en, en[:80])
+    check("中文报告与缺省输出一致", zh == core.build_segment_report(paths, precision=4))
+    check("中文线段类型名称", all(
+        tag in zh for tag in ("线段)", "二次贝塞尔)", "三次贝塞尔)", "椭圆弧)")
+    ), zh[:120])
+    check("英文线段类型名称", all(
+        tag in en
+        for tag in ("line)", "quadratic Bezier)", "cubic Bezier)", "elliptical arc)")
+    ), en[:200])
+    check("空路径英文报告",
+          core.build_segment_report([], lang="en") == "No path segments found")
+
+    fzh = core.build_fourier_report(
+        paths, n_harmonics=4, samples=800, precision=6, fit_all=True, lang="zh"
+    )
+    fen = core.build_fourier_report(
+        paths, n_harmonics=4, samples=800, precision=6, fit_all=True, lang="en"
+    )
+    check("英文傅里叶报告标题",
+          "Fourier series fit (harmonics N=4, samples=800)" in fen,
+          fen.splitlines()[0])
+    check("英文傅里叶聚合坐标", "Coordinate expressions for each block" in fen)
+    check("英文傅里叶无中文", "傅里叶" not in fen and "路径" not in fen)
+    check("中文傅里叶报告不变", "各连续段坐标表达式" in fzh)
+    check("非法语言回退中文",
+          core.build_segment_report([], lang="fr") == "未找到路径段")
+
+
+def test_selected_path_subset():
+    """path_indices 支持多选路径子集，并保留原始路径编号。"""
+    paths = [core.transform_path(p, flip_y=True) for p in load_fixture()]
+
+    sub = core.build_segment_report(paths, path_indices=[0, 2])
+    check("子集报告保留原始编号",
+          "路径 0:" in sub and "路径 2:" in sub and "路径 1:" not in sub, sub[:160])
+    en_sub = core.build_segment_report(paths, path_indices=[1], lang="en")
+    check("子集报告英文标题",
+          "Path 1:" in en_sub and "Path 0:" not in en_sub, en_sub[:80])
+
+    kwargs = dict(n_harmonics=4, samples=800, precision=6)
+    single = core.build_fourier_report(paths, path_index=2, **kwargs)
+    one = core.build_fourier_report(paths, path_indices=[2], **kwargs)
+    multi = core.build_fourier_report(paths, path_indices=[0, 2], **kwargs)
+
+    check("单路径傅里叶为单段格式",
+          "可直接复制到 Desmos" in single and "各连续段坐标表达式" not in single,
+          single.splitlines()[0])
+    check("path_indices 单元素等价于 path_index", one == single, one.splitlines()[0])
+    check("多路径傅里叶为聚合格式",
+          "各连续段坐标表达式" in multi
+          and "路径 0 傅里叶级数拟合" in multi
+          and "路径 2 傅里叶级数拟合" in multi
+          and "路径 1 傅里叶级数拟合" not in multi,
+          multi[:200])
+
+    multi_en = core.build_fourier_report(
+        paths, path_indices=[0, 1], lang="en", **kwargs
+    )
+    check("多路径傅里叶英文标题",
+          "Path 0 Fourier series fit" in multi_en
+          and "Path 1 Fourier series fit" in multi_en,
+          multi_en[:160])
+
+    for bad in ([99], [-1]):
+        try:
+            core.build_fourier_report(paths, path_indices=bad)
+            check(f"越界 path_indices {bad} 抛出异常", False)
+        except ValueError:
+            check(f"越界 path_indices {bad} 抛出异常", True)
+
+    # path_indices 是"取位于给定列表"，子集列表里的编号同样受范围校验
+    try:
+        core.build_segment_report(paths[:2], path_indices=[0, 2])
+        check("分段 path_indices 越界抛出异常", False)
+    except ValueError:
+        check("分段 path_indices 越界抛出异常", True)
+    check("空 path_indices 报告为空路径",
+          core.build_segment_report(paths, path_indices=[]) == "未找到路径段")
+
+
+def test_cli_options():
+    """CLI 的 --lang 与多索引 --path-index。"""
+    import contextlib
+    import io
+
+    fd, path = tempfile.mkstemp(suffix=".svg")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(_FIXTURE)
+
+    def run(argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = core.main([path] + argv)
+        return code, out.getvalue()
+
+    try:
+        code, out = run(["--precision", "3"])
+        check("CLI 默认中文输出", code == 0 and "路径 0:" in out, out[:60])
+
+        code, out = run(["--precision", "3", "--lang", "en"])
+        check("CLI --lang en 输出英文报告",
+              code == 0 and "Path 0:" in out and "路径 0" not in out, out[:60])
+
+        code, out = run(["--fourier", "4", "--samples", "500", "--path-index", "0", "2"])
+        check("CLI 多索引拟合选中路径",
+              code == 0
+              and "路径 0 傅里叶级数拟合" in out
+              and "路径 2 傅里叶级数拟合" in out
+              and "路径 1 傅里叶级数拟合" not in out,
+              out[:160])
+
+        code, out = run(["--fourier", "4", "--samples", "500", "--path-index", "1",
+                         "--lang", "en"])
+        check("CLI 单索引 + 英文",
+              code == 0 and "Path 1 Fourier series fit" in out, out[:80])
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def test_invalid_params():
     circle = load_fixture()[3]
     for kwargs in ({"n_harmonics": 0}, {"num_samples": 1}):
@@ -162,6 +294,9 @@ def main() -> int:
     test_segment_report()
     test_fourier_report()
     test_discontinuity_split()
+    test_report_languages()
+    test_selected_path_subset()
+    test_cli_options()
     test_invalid_params()
     print(f"\n{'ALL PASS' if not failures else 'FAILURES: ' + ', '.join(failures)}")
     return 1 if failures else 0

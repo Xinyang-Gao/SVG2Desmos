@@ -20,9 +20,12 @@
       因此命令行与 GUI 可以安全地并行/在工作线程中调用。
     * ``build_segment_report`` 与 ``build_fourier_report`` 是命令行与 GUI
       共用的报告构建器，保证两种入口的输出格式完全一致。
+    * 报告构建器接受 ``lang``（zh/en）与 ``path_indices``（多路径子集并保留
+      原始编号）参数：GUI 的语言切换与多选路径都由它们支撑，缺省值保持
+      原有中文单路径输出不变。
 
 依赖项：svgpathtools, numpy（傅里叶模式需要）
-用法：python svg_to_function.py input.svg [-o output.txt] [--fourier N] [--path-index idx] [--fit-all-paths] [--split-discontinuities] [--samples N] [--precision N] [--no-flip-y]
+用法：python svg_to_function.py input.svg [-o output.txt] [--fourier N] [--path-index idx ...] [--fit-all-paths] [--split-discontinuities] [--samples N] [--precision N] [--lang {zh,en}] [--no-flip-y]
 """
 import argparse
 import math
@@ -55,6 +58,102 @@ PRECISION = 4
 
 # 傅里叶系数过滤阈值
 _COEFF_EPS = 1e-12
+
+
+# --- 报告文案（命令行默认中文；GUI 可传 lang="en" 输出英文报告）---
+
+_REPORT_TEXT = {
+    "zh": {
+        "no_paths": "未找到路径段",
+        "path_header": "路径 {index}:",
+        "seg_header": "第 {index} 段({kind}):",
+        "unknown_seg_header": "第 {index} 段(未知类型):",
+        "coords_header": "各线段坐标表达式 (每行一条):",
+        "label.path": "路径 {index}",
+        "label.path_seg": "路径{index}段{sub}",
+        "fourier_header": "{label} 傅里叶级数拟合 (谐波数 N={n}, 采样点={samples}):",
+        "desmos_header": "可直接复制到 Desmos 的坐标表达式:",
+        "fourier_coords_header": "各连续段坐标表达式 (每行一条，按顺序对应上面各段):",
+        "err.no_fit": "没有成功拟合任何连续段",
+        "err.index_range": "路径索引 {index} 超出范围（共 {total} 条路径）",
+        "err.need_numpy": "傅里叶模式需要 numpy，请运行：pip install numpy",
+        "err.harmonics": "谐波次数必须 >= 1",
+        "err.samples": "采样点数必须 >= 2",
+        "err.prefix": "错误：",
+        "cli.read_fail": "读取 SVG 时出错：{exc}",
+        "cli.no_paths": "未找到任何路径",
+        "cli.flip": "已应用 Y 轴翻转 (SVG → 数学坐标系)",
+        "cli.written": "输出已写入 {path}",
+        "warn.alias": (
+            "警告：谐波数 {n} 大于等于采样点数 {samples} 的一半，"
+            "可能发生混叠。建议增加采样点数或减少谐波数。"
+        ),
+        "warn.fit_failed": "警告：{label} 拟合失败：{exc}",
+        "kind.line": "线段",
+        "kind.quad": "二次贝塞尔",
+        "kind.cubic": "三次贝塞尔",
+        "kind.arc": "椭圆弧",
+        "kind.unknown": "未知类型",
+    },
+    "en": {
+        "no_paths": "No path segments found",
+        "path_header": "Path {index}:",
+        "seg_header": "Segment {index} ({kind}):",
+        "unknown_seg_header": "Segment {index} (unknown type):",
+        "coords_header": "Coordinate expressions (one per line):",
+        "label.path": "Path {index}",
+        "label.path_seg": "Path {index}.{sub}",
+        "fourier_header": "{label} Fourier series fit (harmonics N={n}, samples={samples}):",
+        "desmos_header": "Coordinate expressions ready to paste into Desmos:",
+        "fourier_coords_header": (
+            "Coordinate expressions for each block (one per line, in the order above):"
+        ),
+        "err.no_fit": "No block was fitted successfully",
+        "err.index_range": "Path index {index} is out of range ({total} paths)",
+        "err.need_numpy": "Fourier mode requires numpy, run: pip install numpy",
+        "err.harmonics": "Harmonics must be >= 1",
+        "err.samples": "Sample points must be >= 2",
+        "err.prefix": "Error: ",
+        "cli.read_fail": "Error reading SVG: {exc}",
+        "cli.no_paths": "No paths found",
+        "cli.flip": "Y-axis flip applied (SVG → math coordinates)",
+        "cli.written": "Output written to {path}",
+        "warn.alias": (
+            "Warning: harmonics {n} >= samples/2 ({samples}) may alias; "
+            "increase the sample count or reduce the harmonics."
+        ),
+        "warn.fit_failed": "Warning: fitting {label} failed: {exc}",
+        "kind.line": "line",
+        "kind.quad": "quadratic Bezier",
+        "kind.cubic": "cubic Bezier",
+        "kind.arc": "elliptical arc",
+        "kind.unknown": "unknown type",
+    },
+}
+
+
+def _norm_lang(lang: Optional[str]) -> str:
+    """把任意语言标识归一化为 'zh' / 'en'（核心模块自包含，不依赖 i18n）。"""
+    if isinstance(lang, str) and lang.strip().lower().replace("_", "-").startswith("en"):
+        return "en"
+    return "zh"
+
+
+def _rt(key: str, lang: Optional[str] = None, **kwargs) -> str:
+    """
+    取报告文案并插值。
+
+    缺 key 回退中文表，再回退 key 本身；格式化失败返回原始模板，绝不抛异常。
+    """
+    code = _norm_lang(lang)
+    table = _REPORT_TEXT.get(code) or _REPORT_TEXT["zh"]
+    text = table.get(key) or _REPORT_TEXT["zh"].get(key) or key
+    if not kwargs:
+        return text
+    try:
+        return text.format(**kwargs)
+    except Exception:
+        return text
 
 
 # --- 数值格式化 ---
@@ -269,20 +368,20 @@ def transform_path(path: Path, flip_y: bool = True) -> Path:
 
 SegmentType = Union[Line, QuadraticBezier, CubicBezier, Arc]
 
-# 线段类型 → 显示名称
+# 线段类型 → 文案 key（实际名称由 _REPORT_TEXT 按语言给出）
 _SEGMENT_KINDS = (
-    (Line, "线段"),
-    (QuadraticBezier, "二次贝塞尔"),
-    (CubicBezier, "三次贝塞尔"),
-    (Arc, "椭圆弧"),
+    (Line, "kind.line"),
+    (QuadraticBezier, "kind.quad"),
+    (CubicBezier, "kind.cubic"),
+    (Arc, "kind.arc"),
 )
 
 
-def _segment_kind(seg) -> str:
-    for cls, name in _SEGMENT_KINDS:
+def _segment_kind(seg, lang: Optional[str] = None) -> str:
+    for cls, key in _SEGMENT_KINDS:
         if isinstance(seg, cls):
-            return name
-    return "未知类型"
+            return _rt(key, lang)
+    return _rt("kind.unknown", lang)
 
 
 def _segment_expressions(seg: SegmentType, precision: int) -> Tuple[str, str]:
@@ -299,7 +398,10 @@ def _segment_expressions(seg: SegmentType, precision: int) -> Tuple[str, str]:
 
 
 def segment_to_expression(
-    seg: SegmentType, seg_index: int, precision: Optional[int] = None
+    seg: SegmentType,
+    seg_index: int,
+    precision: Optional[int] = None,
+    lang: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     返回该线段参数方程的主要描述字符串和紧凑坐标表达式字符串。
@@ -308,16 +410,19 @@ def segment_to_expression(
     if precision is None:
         precision = PRECISION
 
-    kind = _segment_kind(seg)
-    if kind == "未知类型":
-        main_str = f"第 {seg_index} 段(未知类型):\n {seg}\n--------------------"
+    kind = _segment_kind(seg, lang)
+    if kind == _rt("kind.unknown", lang):
+        main_str = (
+            _rt("unknown_seg_header", lang, index=seg_index)
+            + f"\n {seg}\n--------------------"
+        )
         return main_str, "Unknown segment type"
 
     x_expr, y_expr = _segment_expressions(seg, precision)
 
     main_str = "\n".join(
         [
-            f"第 {seg_index} 段({kind}):",
+            _rt("seg_header", lang, index=seg_index, kind=kind),
             f" x(t) = {x_expr}",
             f" y(t) = {y_expr}",
             " t ∈ [0, 1]",
@@ -328,16 +433,33 @@ def segment_to_expression(
 
 
 def process_paths(
-    paths: List[Path], precision: Optional[int] = None
+    paths: List[Path],
+    precision: Optional[int] = None,
+    path_indices: Optional[List[int]] = None,
+    lang: Optional[str] = None,
 ) -> Tuple[List[str], List[str]]:
-    """处理路径列表，返回主输出和坐标表达式列表"""
+    """
+    处理路径列表，返回主输出和坐标表达式列表。
+
+    path_indices 给出要处理的路径编号（取位于 ``paths``，报告中保留这些编号），
+    缺省时按当前位置处理全部路径；编号越界抛 ValueError。
+    """
     output_lines: List[str] = []
     coordinate_expressions: List[str] = []
 
-    for path_idx, path in enumerate(paths):
-        output_lines.append(f"路径 {path_idx}:")
+    selected = range(len(paths)) if path_indices is None else path_indices
+    for display_idx in selected:
+        display_idx = int(display_idx)
+        if display_idx < 0 or display_idx >= len(paths):
+            raise ValueError(
+                _rt("err.index_range", lang, index=display_idx, total=len(paths))
+            )
+        path = paths[display_idx]
+        output_lines.append(_rt("path_header", lang, index=display_idx))
         for seg_idx, seg in enumerate(path):
-            main_str, coord_str = segment_to_expression(seg, seg_idx, precision)
+            main_str, coord_str = segment_to_expression(
+                seg, seg_idx, precision, lang=lang
+            )
             output_lines.append(main_str)
             coordinate_expressions.append(coord_str)
         output_lines.append("")  # 路径之间空行
@@ -346,15 +468,27 @@ def process_paths(
 
 
 def build_segment_report(
-    paths: List[Path], precision: Optional[int] = None
+    paths: List[Path],
+    precision: Optional[int] = None,
+    path_indices: Optional[List[int]] = None,
+    lang: Optional[str] = None,
 ) -> str:
-    """构建分段表达式报告文本（命令行与 GUI 共用）。"""
-    if not paths or all(len(p) == 0 for p in paths):
-        return "未找到路径段"
+    """
+    构建分段表达式报告文本（命令行与 GUI 共用）。
 
-    output_lines, coordinate_expressions = process_paths(paths, precision)
+    path_indices 与 ``process_paths`` 同义：缺省输出全部路径，给定时只输出
+    这些编号的路径（报告标题仍用原始编号）。
+    """
+    if not paths or all(len(p) == 0 for p in paths):
+        return _rt("no_paths", lang)
+    if path_indices is not None and len(path_indices) == 0:
+        return _rt("no_paths", lang)
+
+    output_lines, coordinate_expressions = process_paths(
+        paths, precision, path_indices=path_indices, lang=lang
+    )
     if coordinate_expressions:
-        output_lines.extend(["", "各线段坐标表达式 (每行一条):"])
+        output_lines.extend(["", _rt("coords_header", lang)])
         output_lines.extend(coordinate_expressions)
     return "\n".join(output_lines)
 
@@ -387,23 +521,29 @@ def split_path_at_discontinuities(path: Path, tolerance: float = 1e-6) -> List[P
 
 
 def collect_continuous_segments(
-    paths: List[Path], split: bool, tolerance: float = 1e-6
+    paths: List[Path],
+    split: bool,
+    tolerance: float = 1e-6,
+    lang: Optional[str] = None,
 ) -> List[Tuple[str, Path]]:
     """
     根据是否分割，将输入路径列表转换为连续段列表。
-    返回列表，每个元素为 (label, path)，label 如 "路径0" 或 "路径0段1"。
+    返回列表，每个元素为 (label, path)，label 如 "路径 0" 或 "路径0段1"。
     """
     segments: List[Tuple[str, Path]] = []
     for path_idx, path in enumerate(paths):
+        label = _rt("label.path", lang, index=path_idx)
         if split:
             subpaths = split_path_at_discontinuities(path, tolerance)
             if len(subpaths) == 1:
-                segments.append((f"路径{path_idx}", subpaths[0]))
+                segments.append((label, subpaths[0]))
             else:
                 for sub_idx, subpath in enumerate(subpaths):
-                    segments.append((f"路径{path_idx}段{sub_idx}", subpath))
+                    segments.append(
+                        (_rt("label.path_seg", lang, index=path_idx, sub=sub_idx), subpath)
+                    )
         else:
-            segments.append((f"路径{path_idx}", path))
+            segments.append((label, path))
     return segments
 
 
@@ -496,25 +636,28 @@ def format_fourier_series(
 
 
 def fourier_fit_path(
-    path: Path, n_harmonics: int = 5, num_samples: int = 1000, precision: int = 4
+    path: Path,
+    n_harmonics: int = 5,
+    num_samples: int = 1000,
+    precision: int = 4,
+    lang: Optional[str] = None,
 ) -> Tuple[str, str, str]:
     """
     对路径进行傅里叶级数拟合，返回 (x_expr, y_expr, coord_expr) 字符串，
     可直接复制到 Desmos 中使用。
     """
     if np is None:
-        raise ImportError("傅里叶模式需要 numpy，请运行：pip install numpy")
+        raise ImportError(_rt("err.need_numpy", lang))
 
     if n_harmonics < 1:
-        raise ValueError("谐波次数必须 >= 1")
+        raise ValueError(_rt("err.harmonics", lang))
     if num_samples < 2:
-        raise ValueError("采样点数必须 >= 2")
+        raise ValueError(_rt("err.samples", lang))
 
     # Nyquist 检查
     if n_harmonics >= num_samples / 2:
         print(
-            f"警告：谐波数 {n_harmonics} 大于等于采样点数 {num_samples} 的一半，"
-            f"可能发生混叠。建议增加采样点数或减少谐波数。",
+            _rt("warn.alias", lang, n=n_harmonics, samples=num_samples),
             file=sys.stderr,
         )
 
@@ -532,30 +675,68 @@ def fourier_fit_path(
 
 
 def _select_fourier_segments(
-    paths: List[Path], fit_all: bool, path_index: int, split: bool
+    paths: List[Path],
+    fit_all: bool,
+    path_index: int,
+    split: bool,
+    path_indices: Optional[List[int]] = None,
+    lang: Optional[str] = None,
 ) -> Tuple[List[Tuple[str, Path]], bool]:
     """
     选择需要拟合的段。返回 (segments, is_multi_format)。
     is_multi_format 决定输出使用“多段聚合”格式还是“单段”格式。
+
+    path_indices 为 GUI 多选时的原始路径编号列表：
+        * None            → 使用 path_index（单条，旧行为）
+        * [i]             → 等价于 path_index=i（保持单段输出格式）
+        * [i, j, ...]     → 多条路径，使用聚合格式
     """
     if fit_all:
-        return collect_continuous_segments(paths, split), True
+        return collect_continuous_segments(paths, split, lang=lang), True
 
-    if path_index < 0 or path_index >= len(paths):
-        raise ValueError(
-            f"路径索引 {path_index} 超出范围（共 {len(paths)} 条路径）"
-        )
+    if path_indices is None:
+        selected = [path_index]
+    else:
+        selected = [int(idx) for idx in path_indices]
+        if not selected:
+            selected = [path_index]
 
-    if split:
-        subpaths = split_path_at_discontinuities(paths[path_index])
-        if len(subpaths) > 1:
-            segments = [
-                (f"路径{path_index}段{sub_idx}", subpath)
-                for sub_idx, subpath in enumerate(subpaths)
-            ]
-            return segments, True
+    for idx in selected:
+        if idx < 0 or idx >= len(paths):
+            raise ValueError(
+                _rt("err.index_range", lang, index=idx, total=len(paths))
+            )
 
-    return [(f"路径 {path_index}", paths[path_index])], False
+    if len(selected) == 1:
+        index = selected[0]
+        if split:
+            subpaths = split_path_at_discontinuities(paths[index])
+            if len(subpaths) > 1:
+                segments = [
+                    (_rt("label.path_seg", lang, index=index, sub=sub_idx), subpath)
+                    for sub_idx, subpath in enumerate(subpaths)
+                ]
+                return segments, True
+
+        return [(_rt("label.path", lang, index=index), paths[index])], False
+
+    # 多选：逐条收集，split=True 时在不连续点处断开
+    segments = []
+    for index in selected:
+        label = _rt("label.path", lang, index=index)
+        if split:
+            subpaths = split_path_at_discontinuities(paths[index])
+            if len(subpaths) > 1:
+                segments.extend(
+                    (
+                        _rt("label.path_seg", lang, index=index, sub=sub_idx),
+                        subpath,
+                    )
+                    for sub_idx, subpath in enumerate(subpaths)
+                )
+                continue
+        segments.append((label, paths[index]))
+    return segments, True
 
 
 def _fit_segments(
@@ -564,6 +745,7 @@ def _fit_segments(
     samples: int,
     precision: int,
     skip_failures: bool,
+    lang: Optional[str] = None,
 ) -> List[Tuple[str, str, str, str]]:
     """
     对多个段执行傅里叶拟合。
@@ -574,12 +756,12 @@ def _fit_segments(
     for label, path in segments:
         try:
             x_expr, y_expr, coord_expr = fourier_fit_path(
-                path, n_harmonics, samples, precision
+                path, n_harmonics, samples, precision, lang=lang
             )
         except Exception as exc:
             if not skip_failures:
                 raise
-            print(f"警告：{label} 拟合失败：{exc}", file=sys.stderr)
+            print(_rt("warn.fit_failed", lang, label=label, exc=exc), file=sys.stderr)
             continue
         results.append((label, x_expr, y_expr, coord_expr))
     return results
@@ -590,21 +772,22 @@ def format_fourier_report(
     n_harmonics: int,
     samples: int,
     multi_format: bool,
+    lang: Optional[str] = None,
 ) -> str:
     """把拟合结果渲染为报告文本。"""
     if not results:
-        raise ValueError("没有成功拟合任何连续段")
+        raise ValueError(_rt("err.no_fit", lang))
 
     if not multi_format:
         label, x_expr, y_expr, coord_expr = results[0]
         return "\n".join(
             [
-                f"{label} 傅里叶级数拟合 (谐波数 N={n_harmonics}, 采样点={samples}):",
+                _rt("fourier_header", lang, label=label, n=n_harmonics, samples=samples),
                 x_expr,
                 y_expr,
                 "t ∈ [0, 2π]",
                 "",
-                "可直接复制到 Desmos 的坐标表达式:",
+                _rt("desmos_header", lang),
                 coord_expr,
             ]
         )
@@ -612,7 +795,7 @@ def format_fourier_report(
     blocks = [
         "\n".join(
             [
-                f"{label} 傅里叶级数拟合 (谐波数 N={n_harmonics}, 采样点={samples}):",
+                _rt("fourier_header", lang, label=label, n=n_harmonics, samples=samples),
                 x_expr,
                 y_expr,
                 "t ∈ [0, 2π]",
@@ -622,7 +805,7 @@ def format_fourier_report(
         )
         for label, x_expr, y_expr, _ in results
     ]
-    coord_lines = ["", "各连续段坐标表达式 (每行一条，按顺序对应上面各段):"]
+    coord_lines = ["", _rt("fourier_coords_header", lang)]
     coord_lines.extend(coord for *_, coord in results)
     blocks.append("\n".join(coord_lines))
     return "\n".join(blocks)
@@ -636,27 +819,33 @@ def build_fourier_report(
     fit_all: bool = False,
     path_index: int = 0,
     split: bool = False,
+    path_indices: Optional[List[int]] = None,
+    lang: Optional[str] = None,
 ) -> str:
     """
     构建傅里叶拟合报告文本（命令行与 GUI 共用）。
 
-    fit_all=False 时只拟合 path_index 指定的路径；split=True 时先在不连续点
-    处断开。参数非法时抛出 ValueError/IndexError，缺少 numpy 时抛出 ImportError。
+    fit_all=False 时只拟合 path_indices 指定的路径（这些编号取位于 ``paths``，
+    缺省为单条 path_index）；split=True 时先在不连续点处断开。
+    参数非法时抛出 ValueError/IndexError，缺少 numpy 时抛出 ImportError。
     """
     if np is None:
-        raise ImportError("傅里叶模式需要 numpy，请运行：pip install numpy")
+        raise ImportError(_rt("err.need_numpy", lang))
     if precision is None:
         precision = PRECISION
 
-    segments, multi_format = _select_fourier_segments(paths, fit_all, path_index, split)
+    segments, multi_format = _select_fourier_segments(
+        paths, fit_all, path_index, split, path_indices=path_indices, lang=lang
+    )
     results = _fit_segments(
         segments,
         n_harmonics,
         samples,
         precision,
         skip_failures=multi_format,
+        lang=lang,
     )
-    return format_fourier_report(results, n_harmonics, samples, multi_format)
+    return format_fourier_report(results, n_harmonics, samples, multi_format, lang=lang)
 
 
 # --- 兼容旧接口的输出包装 ---
@@ -668,11 +857,14 @@ def fourier_fit_multiple_segments(
     samples: int,
     precision: int,
     output_file: Optional[str] = None,
+    lang: Optional[str] = None,
 ) -> None:
     """对多个连续段进行傅里叶拟合并输出（兼容旧接口）。"""
-    results = _fit_segments(segments, n_harmonics, samples, precision, skip_failures=True)
-    text = format_fourier_report(results, n_harmonics, samples, multi_format=True)
-    _emit(text, output_file)
+    results = _fit_segments(
+        segments, n_harmonics, samples, precision, skip_failures=True, lang=lang
+    )
+    text = format_fourier_report(results, n_harmonics, samples, multi_format=True, lang=lang)
+    _emit(text, output_file, lang=lang)
 
 
 def output_fourier_result_single(
@@ -683,21 +875,31 @@ def output_fourier_result_single(
     precision: int,
     output_file: Optional[str] = None,
     split: bool = False,
+    lang: Optional[str] = None,
 ) -> None:
     """输出单条路径的傅里叶拟合结果（兼容旧接口）。"""
     if split:
         subpaths = split_path_at_discontinuities(path)
         if len(subpaths) > 1:
             segments = [
-                (f"路径{path_idx}段{sub_idx}", subpath)
+                (
+                    _rt("label.path_seg", lang, index=path_idx, sub=sub_idx),
+                    subpath,
+                )
                 for sub_idx, subpath in enumerate(subpaths)
             ]
-            results = _fit_segments(segments, n_harmonics, samples, precision, skip_failures=True)
-            text = format_fourier_report(results, n_harmonics, samples, multi_format=True)
-            _emit(text, output_file)
+            results = _fit_segments(
+                segments, n_harmonics, samples, precision, skip_failures=True, lang=lang
+            )
+            text = format_fourier_report(
+                results, n_harmonics, samples, multi_format=True, lang=lang
+            )
+            _emit(text, output_file, lang=lang)
             return
 
-    _output_single_segment(path, path_idx, n_harmonics, samples, precision, output_file)
+    _output_single_segment(
+        path, path_idx, n_harmonics, samples, precision, output_file, lang=lang
+    )
 
 
 def _output_single_segment(
@@ -707,35 +909,38 @@ def _output_single_segment(
     samples: int,
     precision: int,
     output_file: Optional[str],
+    lang: Optional[str] = None,
 ) -> None:
     """输出单个连续段的拟合结果（不分段，不聚合）。"""
     try:
-        x_expr, y_expr, coord_expr = fourier_fit_path(path, n_harmonics, samples, precision)
+        x_expr, y_expr, coord_expr = fourier_fit_path(
+            path, n_harmonics, samples, precision, lang=lang
+        )
     except ImportError as exc:
-        print(f"错误：{exc}", file=sys.stderr)
+        print(_rt("err.prefix", lang) + str(exc), file=sys.stderr)
         sys.exit(1)
 
-    label_str = f"路径 {label}" if isinstance(label, int) else str(label)
-    text = "\n".join(
-        [
-            f"{label_str} 傅里叶级数拟合 (谐波数 N={n_harmonics}, 采样点={samples}):",
-            x_expr,
-            y_expr,
-            "t ∈ [0, 2π]",
-            "",
-            "可直接复制到 Desmos 的坐标表达式:",
-            coord_expr,
-        ]
+    label_str = (
+        _rt("label.path", lang, index=label) if isinstance(label, int) else str(label)
     )
-    _emit(text, output_file)
+    text = format_fourier_report(
+        [(label_str, x_expr, y_expr, coord_expr)],
+        n_harmonics,
+        samples,
+        multi_format=False,
+        lang=lang,
+    )
+    _emit(text, output_file, lang=lang)
 
 
-def _emit(text: str, output_file: Optional[str]) -> None:
+def _emit(
+    text: str, output_file: Optional[str], lang: Optional[str] = None
+) -> None:
     """统一的输出写入：写文件或打印到标准输出。"""
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(text)
-        print(f"输出已写入 {output_file}")
+        print(_rt("cli.written", lang, path=output_file))
     else:
         print(text)
 
@@ -757,8 +962,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="使用傅里叶级数拟合，可选指定谐波次数（默认 5）",
     )
-    parser.add_argument("--path-index", type=int, default=0,
-                        help="傅里叶模式下选择的路径索引（默认 0）")
+    parser.add_argument(
+        "--path-index",
+        type=int,
+        nargs="+",
+        default=[0],
+        metavar="IDX",
+        help="傅里叶模式下选择的路径索引，可指定多个（默认 0）",
+    )
     parser.add_argument("--fit-all-paths", action="store_true",
                         help="傅里叶模式下对所有路径分别拟合（覆盖 --path-index 设置）")
     parser.add_argument("--split-discontinuities", action="store_true",
@@ -767,6 +978,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="傅里叶模式下的采样点数（默认 1000）")
     parser.add_argument("--precision", type=int, default=4,
                         help="输出表达式的小数精度（默认 4）")
+    parser.add_argument("--lang", choices=("zh", "en"), default="zh",
+                        help="输出报告的语言（默认 zh）")
     parser.add_argument("--flip-y", action="store_true", default=True,
                         help="翻转 Y 坐标（适用于 Desmos 等数学坐标系，默认开启）")
     parser.add_argument("--no-flip-y", dest="flip_y", action="store_false",
@@ -777,6 +990,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    lang = args.lang
 
     if not 0 <= args.precision <= 10:
         parser.error("--precision 必须在 0 到 10 之间")
@@ -784,24 +998,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--samples 必须 >= 2")
     if args.fourier is not None and args.fourier < 1:
         parser.error("--fourier 谐波次数必须 >= 1")
-    if args.path_index < 0:
+
+    # --path-index 支持一个或多个索引
+    path_indices = [int(idx) for idx in args.path_index] or [0]
+    if any(idx < 0 for idx in path_indices):
         parser.error("--path-index 不能为负数")
 
     # 读取 SVG
     try:
         paths, _ = svg2paths(args.input)
     except Exception as exc:
-        print(f"读取 SVG 时出错：{exc}", file=sys.stderr)
+        print(_rt("cli.read_fail", lang, exc=exc), file=sys.stderr)
         return 1
 
     if not paths:
-        print("未找到任何路径", file=sys.stderr)
+        print(_rt("cli.no_paths", lang), file=sys.stderr)
         return 1
 
     # 应用 Y 轴翻转（如果需要）
     if args.flip_y:
         paths = [transform_path(p, flip_y=True) for p in paths]
-        print("已应用 Y 轴翻转 (SVG → 数学坐标系)", file=sys.stderr)
+        print(_rt("cli.flip", lang), file=sys.stderr)
 
     try:
         if args.fourier is not None:
@@ -811,16 +1028,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                 samples=args.samples,
                 precision=args.precision,
                 fit_all=args.fit_all_paths,
-                path_index=args.path_index,
+                path_index=path_indices[0],
                 split=args.split_discontinuities,
+                path_indices=path_indices if len(path_indices) > 1 else None,
+                lang=lang,
             )
         else:
-            text = build_segment_report(paths, precision=args.precision)
+            text = build_segment_report(
+                paths, precision=args.precision, lang=lang
+            )
     except (ValueError, IndexError) as exc:
-        print(f"错误：{exc}", file=sys.stderr)
+        print(_rt("err.prefix", lang) + str(exc), file=sys.stderr)
         return 1
 
-    _emit(text, args.output)
+    _emit(text, args.output, lang=lang)
     return 0
 
 
